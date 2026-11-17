@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Backyard Gravel – Live</title>
+<style>
+:root{--bg:#f6f5f1;--card:#fff;--tx:#1d1d1b;--mut:#6b6a64;--ac:#c2410c;--ok:#15803d;--ko:#b91c1c;--bd:#e3e1da;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161614;--card:#222220;--tx:#f1efe8;--mut:#a09f97;--ac:#fb923c;--ok:#4ade80;--ko:#f87171;--bd:#34332f;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#161614;--card:#222220;--tx:#f1efe8;--mut:#a09f97;--ac:#fb923c;--ok:#4ade80;--ko:#f87171;--bd:#34332f;color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:640px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:0 0 12px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:14px;margin-bottom:12px}
+.big{font-size:44px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--ac);line-height:1.1}
+.mut{color:var(--mut);font-size:14px}
+.tabs{display:flex;gap:6px;margin-bottom:12px}
+.tabs button{flex:1}
+button,input{font:inherit;border-radius:10px;border:1px solid var(--bd);padding:10px 12px;background:var(--card);color:var(--tx)}
+button{cursor:pointer;font-weight:600}
+button.on,button.pri{background:var(--ac);color:#fff;border-color:var(--ac)}
+button.dng{color:var(--ko)}
+.row{display:flex;gap:8px;margin-top:8px}
+.row input{flex:1;min-width:0}
+table{width:100%;border-collapse:collapse}
+td,th{padding:7px 4px;border-bottom:1px solid var(--bd);text-align:left;font-size:15px}
+th{color:var(--mut);font-weight:500;font-size:13px}
+.wrap{overflow-x:auto}
+.tag{font-size:12px;padding:2px 8px;border-radius:99px;border:1px solid var(--bd)}
+.in{color:var(--ok)}.out{color:var(--ko)}
+.msg{margin-top:10px;font-weight:600}
+</style>
+</head>
+<body>
+<main>
+<h1>Backyard Gravel · Live</h1>
+<div class="tabs" id="tabs"></div>
+<button id="lg" class="mut" style="margin:0 0 12px;font-size:13px">Accès organisateur</button>
+<div id="head" class="card"></div>
+<div id="camwrap" class="card" hidden><video id="cam" playsinline muted style="width:100%;border-radius:10px;background:#000"></video><div class="mut" id="cmsg">Présente un QR code devant la caméra</div></div>
+<div id="body"></div>
+</main>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script>
+// ====== À REMPLIR ======
+const FIREBASE_CONFIG={apiKey:"AIzaSyDaCxlWwiTZbgMdSUDNEmUbH957Xzx2c-w",authDomain:"bikeyard-6a46f.firebaseapp.com",projectId:"bikeyard-6a46f",appId:"1:663302801463:web:3c18017eb707733fd097b2"};
+const PIN="BKY-7392"; // code organisateur à changer
+// =======================
+let db=null,user=null,cfg={lapMin:60,maxLaps:24,startAt:null},riders=[],isOrga=false,tab="live",lastN=-1,note="",loaded=false;
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pad=n=>String(n).padStart(2,"0");
+const mmss=ms=>{ms=Math.max(0,Math.ceil(ms/1000));return pad(Math.floor(ms/60))+":"+pad(ms%60)};
+const col=()=>db.collection("race");
+function info(){
+  if(!cfg.startAt)return{n:0};
+  const L=cfg.lapMin*60000,el=Date.now()-cfg.startAt,n=Math.floor(el/L)+1;
+  return n>cfg.maxLaps?{n:cfg.maxLaps+1,over:true}:{n,left:L-el%L};
+}
+function status(r,i){
+  if(r.out)return"out";
+  if(!i.n)return"wait";
+  return r.laps.length>=i.n-1?"in":"out";
+}
+function ranked(i){
+  return riders.slice().sort((a,b)=>b.laps.length-a.laps.length||(a.laps[a.laps.length-1]||0)-(b.laps[b.laps.length-1]||0)||a.bib-b.bib);
+}
+function renderTabs(){
+  const t=[["live","Live"]];
+  if(isOrga)t.push(["scan","Chrono"],["reg","Inscrits"]);
+  $("#tabs").innerHTML=t.map(([k,l])=>`<button class="${tab===k?"on":""}" data-t="${k}">${l}</button>`).join("");
+  $("#tabs").querySelectorAll("button").forEach(b=>b.onclick=()=>{tab=b.dataset.t;note="";if(tab!=="scan"&&camOn)stopCam();renderTabs();renderBody()});
+}
+function renderHead(){
+  const i=info(),alive=riders.filter(r=>status(r,i)==="in").length;
+  let h;
+  if(!loaded)h=`<div class="mut">Chargement des données…</div>`;
+  else if(!i.n)h=`<div class="mut">La course n’a pas encore démarré</div><div class="big">${riders.length}</div><div class="mut">inscrits · tours de ${cfg.lapMin} min · ${cfg.maxLaps} tours max</div>`;
+  else if(i.over)h=`<div class="mut">Course terminée</div><div class="big">${alive?alive+" finaliste"+(alive>1?"s":""):"—"}</div>`;
+  else h=`<div class="mut">Tour ${i.n} / ${cfg.maxLaps}${i.n===cfg.maxLaps?" · <b>COURSE FINALE : le premier arrivé gagne</b>":""}</div><div class="big">${mmss(i.left)}</div><div class="mut">${alive} en course · ${riders.length-alive} éliminés ou abandons</div>`;
+  $("#head").innerHTML=h;
+  if(i.n!==lastN){lastN=i.n;renderBody()}
+}
+function renderBody(){
+  const i=info(),b=$("#body");
+  if(!loaded){b.innerHTML="";return}
+  if(tab==="live"){
+    const rows=ranked(i).map((r,k)=>{const s=status(r,i);return`<tr><td>${k+1}</td><td>#${r.bib}</td><td>${esc(r.name)}<div class="mut">${esc(r.club)}</div></td><td>${r.laps.length}</td><td class="${s}">${s==="in"?(i.over?"Fini":"En course"):s==="out"?"Éliminé":"Au départ"}</td></tr>`}).join("");
+    b.innerHTML=`<div class="card wrap"><table><tr><th>#</th><th>Dos.</th><th>Coureur</th><th>Tours</th><th>État</th></tr>${rows||`<tr><td colspan="5" class="mut">Aucun inscrit pour l’instant</td></tr>`}</table></div>`;
+  }else if(tab==="scan"){
+    b.innerHTML=`<div class="card">${!cfg.startAt?`<button class="pri" id="go" style="width:100%">Lancer le départ du tour 1</button><p class="mut">Les tours se lancent ensuite automatiquement toutes les ${cfg.lapMin} min.</p>`:`<div class="mut">Saisis le numéro de dossard à l’arrivée</div>`}
+    <div class="row"><input id="bib" type="number" inputmode="numeric" placeholder="Dossard"><button class="pri" id="ok">Arrivée</button><button class="dng" id="ab">Abandon</button></div><div class="row"><button id="cb" style="width:100%">${camOn?"Arrêter la caméra":"📷 Activer la caméra"}</button></div><div class="msg" id="msg">${esc(note)}</div></div>`;
+    if($("#go"))$("#go").onclick=()=>{if(confirm("Lancer le départ maintenant ?"))col().doc("config").set({...cfg,startAt:Date.now()})};
+    $("#ok").onclick=()=>scan(false);$("#ab").onclick=()=>scan(true);
+    $("#bib").onkeydown=e=>{if(e.key==="Enter")scan(false)};
+    $("#cb").onclick=()=>camOn?stopCam():startCam();
+  }else{
+    b.innerHTML=`<div class="card"><b>Ajouter un coureur</b><div class="row"><input id="nm" placeholder="Nom"><input id="cl" placeholder="Club"></div><div class="row"><button class="pri" id="add" style="width:100%">Inscrire (dossard #${Math.max(0,...riders.map(r=>r.bib))+1})</button></div></div>
+    ${cfg.startAt?"":`<div class="card"><b>Paramètres</b><div class="row"><input id="lm" type="number" value="${cfg.lapMin}"><input id="ml" type="number" value="${cfg.maxLaps}"></div><div class="mut">Durée d’un tour (min) · nombre de tours max</div><div class="row"><button id="sv" style="width:100%">Enregistrer</button></div></div>`}
+    <div class="card wrap"><table>${riders.sort((a,b)=>a.bib-b.bib).map(r=>`<tr><td>#${r.bib}</td><td>${esc(r.name)}</td><td class="mut">${esc(r.club)}</td></tr>`).join("")}</table></div>`;
+    $("#add").onclick=async()=>{const n=$("#nm").value.trim();if(!n)return;const bib=Math.max(0,...riders.map(r=>r.bib))+1;await col().doc("r"+bib).set({bib,name:n,club:$("#cl").value.trim(),laps:[],out:false})};
+    if($("#sv"))$("#sv").onclick=()=>col().doc("config").set({...cfg,lapMin:+$("#lm").value||60,maxLaps:+$("#ml").value||24});
+  }
+}
+async function scan(abandon,auto){
+  const bib=auto||+$("#bib").value,i=info(),r=riders.find(x=>x.bib===bib);
+  const say=m=>{note=m;const e=$("#msg");if(e)e.textContent=m;const c=$("#cmsg");if(c)c.textContent=m;if(!auto&&$("#bib")){$("#bib").value="";$("#bib").focus()}};
+  if(!r)return say("Dossard inconnu");
+  try{
+    if(abandon){await col().doc("r"+bib).update({out:true});return say("#"+bib+" "+r.name+" : abandon enregistré")}
+    if(!i.n||i.over)return say("Aucun tour en cours");
+    if(status(r,i)!=="in")return say("#"+bib+" est éliminé ou a abandonné");
+    if(r.laps.length>=i.n)return say("#"+bib+" déjà scanné sur ce tour");
+    await col().doc("r"+bib).update({laps:[...r.laps,Date.now()]});
+    say("✓ #"+bib+" "+r.name+" : tour "+i.n+" validé");
+  }catch(e){say("Erreur d’enregistrement, réessaie")}
+}
+let camOn=false,stream=null,timer=null,seen={};
+const bd=window.BarcodeDetector?new BarcodeDetector({formats:["qr_code"]}):null;
+function got(d){
+  const bib=parseInt((String(d).match(/\d+/)||[])[0],10);
+  if(!bib||Date.now()-(seen[bib]||0)<8000)return;
+  seen[bib]=Date.now();
+  if(navigator.vibrate)navigator.vibrate(80);
+  scan(false,bib);
+}
+async function startCam(){
+  if(!bd&&typeof jsQR==="undefined"){note="Lecteur QR non chargé";return renderBody()}
+  try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment",width:{ideal:1280}},audio:false})}
+  catch(e){note="Caméra indisponible ("+((e&&e.name)||"erreur")+")";return renderBody()}
+  camOn=true;note="";
+  const v=$("#cam");v.srcObject=stream;await v.play();
+  $("#camwrap").hidden=false;renderBody();
+  const cv=document.createElement("canvas"),cx=cv.getContext("2d",{willReadFrequently:true});
+  timer=setInterval(async()=>{
+    if(!v.videoWidth)return;
+    if(bd){try{(await bd.detect(v)).forEach(x=>got(x.rawValue))}catch(e){}return}
+    const w=800,h=Math.round(w*v.videoHeight/v.videoWidth);cv.width=w;cv.height=h;
+    cx.drawImage(v,0,0,w,h);
+    const c=jsQR(cx.getImageData(0,0,w,h).data,w,h,{inversionAttempts:"dontInvert"});
+    if(c)got(c.data);
+  },150);
+}
+function stopCam(){
+  clearInterval(timer);if(stream)stream.getTracks().forEach(t=>t.stop());
+  stream=null;camOn=false;$("#camwrap").hidden=true;renderBody();
+}
+(async()=>{
+  setInterval(renderHead,1000);
+  renderTabs();renderHead();
+  try{
+    firebase.initializeApp(FIREBASE_CONFIG);db=firebase.firestore();
+  }catch(e){}
+  if(!db){$("#head").innerHTML=`<div class="mut">Données indisponibles.</div>`;return}
+  isOrga=localStorage.getItem("bkOrga")===PIN;
+  const lg=$("#lg");lg.hidden=isOrga;
+  lg.onclick=()=>{if(prompt("Code organisateur")===PIN){localStorage.setItem("bkOrga",PIN);isOrga=true;lg.hidden=true;renderTabs()}};
+  renderTabs();
+  const t=setTimeout(()=>{if(!loaded)$("#head").innerHTML=`<div class="mut">Les données ne sont pas encore joignables…</div>`},10000);
+  col().onSnapshot(snap=>{
+    clearTimeout(t);
+    let c={lapMin:60,maxLaps:24,startAt:null};riders=[];
+    snap.docs.forEach(d=>{const v=d.data();if(!v)return;if(d.id==="config")c=v;else riders.push({...v,laps:v.laps||[]})});
+    cfg=c;loaded=true;
+    if(!(tab==="scan"&&document.activeElement&&document.activeElement.id==="bib")&&!(tab==="reg"&&document.activeElement&&document.activeElement.tagName==="INPUT"))renderBody();
+    renderHead();
+  },e=>{$("#head").innerHTML=`<div class="mut">Erreur de chargement des données.</div>`});
+})();
+</script>
+</body>
+</html>
