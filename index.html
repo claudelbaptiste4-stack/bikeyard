@@ -43,6 +43,7 @@ th{color:var(--mut);font-weight:500;font-size:13px}
 </main>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/barcode-detector@3.2.3/dist/iife/polyfill.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 <script>
 // ====== À REMPLIR ======
@@ -129,20 +130,23 @@ function got(d){
 }
 async function startCam(){
   if(!bd&&typeof jsQR==="undefined"){note="Lecteur QR non chargé";return renderBody()}
-  try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment",width:{ideal:1280}},audio:false})}
+  try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment",width:{ideal:1920},height:{ideal:1080}},audio:false})}
   catch(e){note="Caméra indisponible ("+((e&&e.name)||"erreur")+")";return renderBody()}
   camOn=true;note="";
   const v=$("#cam");v.srcObject=stream;await v.play();
   $("#camwrap").hidden=false;renderBody();
   const cv=document.createElement("canvas"),cx=cv.getContext("2d",{willReadFrequently:true});
+  let busy=false;
   timer=setInterval(async()=>{
-    if(!v.videoWidth)return;
-    if(bd){try{(await bd.detect(v)).forEach(x=>got(x.rawValue))}catch(e){}return}
-    const w=800,h=Math.round(w*v.videoHeight/v.videoWidth);cv.width=w;cv.height=h;
+    if(!v.videoWidth||busy)return;
+    busy=true;try{
+    if(bd){try{(await bd.detect(v)).forEach(x=>got(x.rawValue));return}catch(e){}}
+    const w=1280,h=Math.round(w*v.videoHeight/v.videoWidth);cv.width=w;cv.height=h;
     cx.drawImage(v,0,0,w,h);
     const c=jsQR(cx.getImageData(0,0,w,h).data,w,h,{inversionAttempts:"dontInvert"});
     if(c)got(c.data);
-  },150);
+    }finally{busy=false}
+  },100);
 }
 function stopCam(){
   clearInterval(timer);if(stream)stream.getTracks().forEach(t=>t.stop());
